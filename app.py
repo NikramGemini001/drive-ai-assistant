@@ -38,13 +38,11 @@ with st.sidebar:
     model_choice = st.selectbox(
         "Модель Gemini",
         options=[
-            "gemini-2.5-flash",
-            "gemini-2.5-pro",
-            "gemini-2.0-flash",
-            "gemini-1.5-pro"
+            "gemini-3.6-flash",
+            "gemini-3.7-flash"
         ],
         index=0,
-        help="2.5 Flash — быстрая и стабильная, 2.5 Pro / 1.5 Pro — глубокий анализ текста и деталей."
+        help="3.6 Flash / 3.7 Flash — быстрые современные модели с поддержкой поиска и распознавания изображений."
     )
     
     photos_index = load_photos_index(drive_mgr)

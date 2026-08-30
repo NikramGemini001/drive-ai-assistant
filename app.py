@@ -35,14 +35,16 @@ drive_mgr = get_drive_manager()
 with st.sidebar:
     st.header("⚙️ Статус и настройки")
     
-    model_choice = st.selectbox(
+   model_choice = st.selectbox(
         "Модель Gemini",
         options=[
-            "gemini-3.7-flash",
-            "gemini-3.1-pro"
+            "gemini-2.5-flash",
+            "gemini-2.5-pro",
+            "gemini-2.0-flash",
+            "gemini-1.5-pro"
         ],
         index=0,
-        help="Flash — быстрая и экономичная, Pro/Thinking — глубокий анализ схем, текста и мелких деталей."
+        help="2.5 Flash — быстрая и стабильная, 2.5 Pro / 1.5 Pro — глубокий анализ текста и фото."
     )
     
     photos_index = load_photos_index(drive_mgr)

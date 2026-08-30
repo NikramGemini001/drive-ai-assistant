@@ -6,7 +6,7 @@ from google.genai import types
 from drive_manager import DriveManager
 
 class GeminiDriveAgent:
-    def __init__(self, api_key: str, drive_manager: DriveManager, model_name: str = "gemini-2.5-flash"):
+    def __init__(self, api_key: str, drive_manager: DriveManager, model_name: str = "gemini-3.6-flash"):
         self.client = genai.Client(api_key=api_key)
         self.drive = drive_manager
         self.model_name = model_name
@@ -42,7 +42,7 @@ class GeminiDriveAgent:
         return json.dumps(results[:10], ensure_ascii=False)
 
     def _call_model_with_retry(self, contents, config, retries=3, delay=3):
-        """Автоматический повтор запроса при перегрузке серверов (ошибки 503/429)."""
+        """Автоматический повтор запроса при перегрузке серверов."""
         for attempt in range(retries):
             try:
                 return self.client.models.generate_content(
@@ -63,7 +63,7 @@ class GeminiDriveAgent:
 Твоя задача — помогать в рабочих и бытовых делах, опираясь на фотографии, документы и метаданные.
 
 ПРАВИЛА РАБОТЫ:
-1. Когда пользователь спрашивает о вещах, чеках, документах, схемах или фото — вызови функцию `search_photos`.
+1. Когда пользователь спрашивает о вещах, чеках, документах, схемах или фото — обязательно вызови функцию `search_photos`.
 2. Изучи описания (description), которые пользователь вносил вручную.
 3. Отвечай емко, точно и по существу на русском языке.
 """
@@ -95,7 +95,8 @@ class GeminiDriveAgent:
 
         contents = []
         for msg in conversation_history:
-            contents.append(types.Content(role=msg["role"], parts=[types.Part.from_text(text=msg["content"])]))
+            role = "model" if msg["role"] == "assistant" else "user"
+            contents.append(types.Content(role=role, parts=[types.Part.from_text(text=msg["content"])]))
         
         contents.append(types.Content(role="user", parts=[types.Part.from_text(text=user_message)]))
         loaded_images = []
@@ -123,9 +124,12 @@ class GeminiDriveAgent:
                         folder_hint=args.get("folder_hint")
                     )
                     
+                    # Фиксируем шаг модели
                     contents.append(response.candidates[0].content)
+                    
+                    # Передаем результат выполнения функции с ролью 'user'
                     contents.append(types.Content(
-                        role="tool",
+                        role="user",
                         parts=[
                             types.Part.from_function_response(
                                 name=name,

@@ -1,6 +1,5 @@
-import json
 import time
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any
 from google import genai
 from google.genai import types
 from drive_manager import DriveManager
@@ -15,34 +14,45 @@ class GeminiDriveAgent:
     def set_photos_index(self, index: List[Dict[str, Any]]):
         self.photos_index = index
 
-    def search_photos(self, query: str, folder_hint: Optional[str] = None) -> str:
+    def search_photos(self, query: str) -> List[Dict[str, Any]]:
+        """Умный поиск фото по совпадениям в описании, названии, пути и дате."""
         if not self.photos_index:
-            return json.dumps({"error": "Индекс фотографий пуст."})
+            return []
 
-        query_tokens = query.lower().split()
-        results = []
+        tokens = [t.strip().lower() for t in query.split() if len(t.strip()) > 2]
+        if not tokens:
+            tokens = [query.strip().lower()]
+
+        scored_results = []
 
         for photo in self.photos_index:
-            text_corpus = f"{photo['name']} {photo['path']} {photo['description']} {photo['created_at']}".lower()
-            matches_query = any(token in text_corpus for token in query_tokens)
-            
-            matches_folder = True
-            if folder_hint:
-                matches_folder = folder_hint.lower() in photo['path'].lower()
+            score = 0
+            desc = photo.get("description", "").lower()
+            name = photo.get("name", "").lower()
+            path = photo.get("path", "").lower()
+            created = photo.get("created_at", "").lower()
 
-            if matches_query and matches_folder:
-                results.append({
-                    "id": photo["id"],
-                    "name": photo["name"],
-                    "folder_path": photo["path"],
-                    "description": photo["description"],
-                    "date": photo["created_at"]
-                })
+            for token in tokens:
+                # Поиск по корню/подстроке (например, "распред" найдет "распредка", "распредкоробка")
+                stem = token[:6] if len(token) > 6 else token
+                
+                if stem in desc:
+                    score += 10
+                if stem in path:
+                    score += 6
+                if stem in name:
+                    score += 4
+                if stem in created:
+                    score += 3
 
-        return json.dumps(results[:10], ensure_ascii=False)
+            if score > 0:
+                scored_results.append((score, photo))
+
+        scored_results.sort(key=lambda x: x[0], reverse=True)
+        return [item[1] for item in scored_results[:3]]
 
     def _call_model_with_retry(self, contents, config, retries=3, delay=3):
-        """Автоматический повтор запроса при перегрузке серверов."""
+        """Повтор запроса при временной перегрузке серверов."""
         for attempt in range(retries):
             try:
                 return self.client.models.generate_content(
@@ -58,96 +68,54 @@ class GeminiDriveAgent:
                 raise e
 
     def generate_response(self, conversation_history: List[Dict[str, Any]], user_message: str) -> tuple[str, List[Dict[str, Any]], List[bytes]]:
-        system_instruction = """
-Ты — персональный мультимодальный ИИ-напарник с доступом к Google Диску пользователя.
-Твоя задача — помогать в рабочих и бытовых делах, опираясь на фотографии, документы и метаданные.
+        matched_photos = self.search_photos(user_message)
+        loaded_images = []
+        parts = []
 
-ПРАВИЛА РАБОТЫ:
-1. Когда пользователь спрашивает о вещах, чеках, документах, схемах или фото — обязательно вызови функцию `search_photos`.
-2. Изучи описания (description), которые пользователь вносил вручную.
-3. Отвечай емко, точно и по существу на русском языке.
+        system_instruction = """
+Ты — персональный мультимодальный ИИ-напарник с прямым доступом к Google Диску пользователя.
+Твоя задача — помогать в рабочих и бытовых делах, опираясь на фотографии, документы, чеки, схемы и метаданные.
+
+ПРАВИЛА:
+1. Если к запросу прикреплены найденные фото — детально изучи их оригиналы и описания, которые пользователь вносил вручную.
+2. Отвечай точно, емко и по существу на русском языке. Опиши важные визуальные детали, если это требуется.
+3. Если ничего подходящего не найдено, ответь по общему смыслу или подскажи, как переформулировать поиск.
 """
 
-        tools = [
-            types.Tool(
-                function_declarations=[
-                    types.FunctionDeclaration(
-                        name="search_photos",
-                        description="Ищет фотографии на Google Диске по ключевым словам в описании, названии файла или папке.",
-                        parameters=types.Schema(
-                            type=types.Type.OBJECT,
-                            properties={
-                                "query": types.Schema(
-                                    type=types.Type.STRING,
-                                    description="Ключевые слова для поиска."
-                                ),
-                                "folder_hint": types.Schema(
-                                    type=types.Type.STRING,
-                                    description="Название папки (если указано)."
-                                )
-                            },
-                            required=["query"]
-                        )
-                    )
-                ]
-            )
-        ]
+        # Если нашлись совпадения — скачиваем оригиналы и прикрепляем в контекст
+        if matched_photos:
+            meta_info = []
+            for idx, photo in enumerate(matched_photos, start=1):
+                meta_info.append(
+                    f"Фото {idx}: '{photo['name']}'\n"
+                    f"Папка: '{photo['path']}'\n"
+                    f"Описание от пользователя: '{photo['description']}'\n"
+                    f"Дата создания: {photo['created_at']}"
+                )
+                try:
+                    file_bytes = self.drive.download_image_bytes(photo["id"])
+                    loaded_images.append(file_bytes)
+                    mime = photo.get("mime_type") or "image/jpeg"
+                    parts.append(types.Part.from_bytes(data=file_bytes, mime_type=mime))
+                except Exception:
+                    pass
+
+            context_text = "НАЙДЕННЫЕ НА ДИСКЕ ФОТОГРАФИИ:\n" + "\n---\n".join(meta_info) + "\n\n"
+            parts.append(types.Part.from_text(text=context_text))
+
+        parts.append(types.Part.from_text(text=f"Запрос пользователя: {user_message}"))
 
         contents = []
         for msg in conversation_history:
             role = "model" if msg["role"] == "assistant" else "user"
             contents.append(types.Content(role=role, parts=[types.Part.from_text(text=msg["content"])]))
-        
-        contents.append(types.Content(role="user", parts=[types.Part.from_text(text=user_message)]))
-        loaded_images = []
+
+        contents.append(types.Content(role="user", parts=parts))
 
         config = types.GenerateContentConfig(
             system_instruction=system_instruction,
-            tools=tools,
             temperature=0.2
         )
 
-        while True:
-            response = self._call_model_with_retry(contents=contents, config=config)
-
-            function_calls = response.function_calls
-            if not function_calls:
-                return response.text or "", contents, loaded_images
-
-            for call in function_calls:
-                name = call.name
-                args = call.args
-
-                if name == "search_photos":
-                    search_res = self.search_photos(
-                        query=args.get("query", ""),
-                        folder_hint=args.get("folder_hint")
-                    )
-                    
-                    # Фиксируем шаг модели
-                    contents.append(response.candidates[0].content)
-                    
-                    # Передаем результат выполнения функции с ролью 'user'
-                    contents.append(types.Content(
-                        role="user",
-                        parts=[
-                            types.Part.from_function_response(
-                                name=name,
-                                response={"result": search_res}
-                            )
-                        ]
-                    ))
-
-                    parsed_res = json.loads(search_res)
-                    if parsed_res and isinstance(parsed_res, list) and len(parsed_res) > 0:
-                        top_photo = parsed_res[0]
-                        file_bytes = self.drive.download_image_bytes(top_photo["id"])
-                        loaded_images.append(file_bytes)
-                        
-                        contents.append(types.Content(
-                            role="user",
-                            parts=[
-                                types.Part.from_bytes(data=file_bytes, mime_type="image/jpeg"),
-                                types.Part.from_text(text=f"Изображение '{top_photo['name']}' (описание: {top_photo['description']}). Изучи его для ответа.")
-                            ]
-                        ))
+        response = self._call_model_with_retry(contents=contents, config=config)
+        return response.text or "", contents, loaded_images

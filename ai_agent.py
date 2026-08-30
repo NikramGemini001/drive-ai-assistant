@@ -1,4 +1,5 @@
 import json
+import time
 from typing import List, Dict, Any, Optional
 from google import genai
 from google.genai import types
@@ -6,38 +7,25 @@ from drive_manager import DriveManager
 
 class GeminiDriveAgent:
     def __init__(self, api_key: str, drive_manager: DriveManager, model_name: str = "gemini-2.5-flash"):
-        """
-        Инициализация ИИ-агента Gemini.
-        :param api_key: Ключ Google AI Studio.
-        :param drive_manager: Экземпляр DriveManager для работы с файлами.
-        :param model_name: Модель (gemini-2.5-flash или gemini-2.5-pro).
-        """
         self.client = genai.Client(api_key=api_key)
         self.drive = drive_manager
         self.model_name = model_name
         self.photos_index: List[Dict[str, Any]] = []
 
     def set_photos_index(self, index: List[Dict[str, Any]]):
-        """Обновляет локальный кэш метаданных фотографий."""
         self.photos_index = index
 
     def search_photos(self, query: str, folder_hint: Optional[str] = None) -> str:
-        """
-        Ищет фото по совпадению в описании, имени файла, пути папки или дате.
-        """
         if not self.photos_index:
-            return json.dumps({"error": "Индекс фотографий пуст или еще не загружен."})
+            return json.dumps({"error": "Индекс фотографий пуст."})
 
         query_tokens = query.lower().split()
         results = []
 
         for photo in self.photos_index:
             text_corpus = f"{photo['name']} {photo['path']} {photo['description']} {photo['created_at']}".lower()
-            
-            # Проверка ключевых слов
             matches_query = any(token in text_corpus for token in query_tokens)
             
-            # Проверка фильтра по папке, если указан
             matches_folder = True
             if folder_hint:
                 matches_folder = folder_hint.lower() in photo['path'].lower()
@@ -51,43 +39,51 @@ class GeminiDriveAgent:
                     "date": photo["created_at"]
                 })
 
-        # Возвращаем максимум 10 наиболее релевантных совпадений
         return json.dumps(results[:10], ensure_ascii=False)
 
+    def _call_model_with_retry(self, contents, config, retries=3, delay=3):
+        """Автоматический повтор запроса при перегрузке серверов (ошибки 503/429)."""
+        for attempt in range(retries):
+            try:
+                return self.client.models.generate_content(
+                    model=self.model_name,
+                    contents=contents,
+                    config=config
+                )
+            except Exception as e:
+                err_str = str(e)
+                if ("503" in err_str or "429" in err_str or "UNAVAILABLE" in err_str) and attempt < retries - 1:
+                    time.sleep(delay * (attempt + 1))
+                    continue
+                raise e
+
     def generate_response(self, conversation_history: List[Dict[str, Any]], user_message: str) -> tuple[str, List[Dict[str, Any]], List[bytes]]:
-        """
-        Обрабатывает запрос пользователя, выполняет Function Calling и возвращает:
-        (ответ_текстом, обновленная_история, список_просмотренных_изображений)
-        """
-        # Системный промпт с правилами работы
         system_instruction = """
 Ты — персональный мультимодальный ИИ-напарник с доступом к Google Диску пользователя.
 Твоя задача — помогать в рабочих и бытовых делах, опираясь на фотографии, документы и метаданные.
 
-ПРАВИЛА РАБОТЫ С ДИСКОМ:
-1. Когда пользователь спрашивает о вещах, чеках, документах, схемах или прошлых событиях — сначала вызови функцию `search_photos` для поиска файлов по ключевым словам, датам или названию папок.
+ПРАВИЛА РАБОТЫ:
+1. Когда пользователь спрашивает о вещах, чеках, документах, схемах или фото — вызови функцию `search_photos`.
 2. Изучи описания (description), которые пользователь вносил вручную.
-3. Если для точного ответа нужно увидеть само изображение (прочесть мелкий шрифт, оценить деталь, серийный номер, внешний вид), запроси загрузку фото.
-4. Отвечай емко, точно и по существу на русском языке.
+3. Отвечай емко, точно и по существу на русском языке.
 """
 
-        # Определение инструментов для Gemini
         tools = [
             types.Tool(
                 function_declarations=[
                     types.FunctionDeclaration(
                         name="search_photos",
-                        description="Ищет фотографии на Google Диске по ключевым словам в описании, имени файла, пути папки или дате создания.",
+                        description="Ищет фотографии на Google Диске по ключевым словам в описании, названии файла или папке.",
                         parameters=types.Schema(
                             type=types.Type.OBJECT,
                             properties={
                                 "query": types.Schema(
                                     type=types.Type.STRING,
-                                    description="Ключевые слова для поиска (например: 'счет за свет', 'гарантия холодильник', 'электрика кухня')."
+                                    description="Ключевые слова для поиска."
                                 ),
                                 "folder_hint": types.Schema(
                                     type=types.Type.STRING,
-                                    description="Необязательное уточнение названия папки (например: 'Ремонт', 'Документы')."
+                                    description="Название папки (если указано)."
                                 )
                             },
                             required=["query"]
@@ -97,37 +93,26 @@ class GeminiDriveAgent:
             )
         ]
 
-        # Преобразуем историю в формат Contents
         contents = []
         for msg in conversation_history:
-            role = msg["role"]
-            contents.append(types.Content(role=role, parts=[types.Part.from_text(text=msg["content"])]))
+            contents.append(types.Content(role=msg["role"], parts=[types.Part.from_text(text=msg["content"])]))
         
-        # Добавляем новое сообщение
         contents.append(types.Content(role="user", parts=[types.Part.from_text(text=user_message)]))
-
         loaded_images = []
 
-        # Цикл обработки Function Calling
-        while True:
-            response = self.client.models.generate_content(
-                model=self.model_name,
-                contents=contents,
-                config=types.GenerateContentConfig(
-                    system_instruction=system_instruction,
-                    tools=tools,
-                    temperature=0.2
-                )
-            )
+        config = types.GenerateContentConfig(
+            system_instruction=system_instruction,
+            tools=tools,
+            temperature=0.2
+        )
 
-            # Проверяем, есть ли вызов функции
+        while True:
+            response = self._call_model_with_retry(contents=contents, config=config)
+
             function_calls = response.function_calls
             if not function_calls:
-                # Финальный текстовый ответ получен
-                final_text = response.text or ""
-                return final_text, contents, loaded_images
+                return response.text or "", contents, loaded_images
 
-            # Обрабатываем вызовы функций
             for call in function_calls:
                 name = call.name
                 args = call.args
@@ -138,7 +123,6 @@ class GeminiDriveAgent:
                         folder_hint=args.get("folder_hint")
                     )
                     
-                    # Запоминаем ответ функции
                     contents.append(response.candidates[0].content)
                     contents.append(types.Content(
                         role="tool",
@@ -150,23 +134,16 @@ class GeminiDriveAgent:
                         ]
                     ))
 
-                    # Если найдены кандидаты, сразу подгружаем первый релевантный оригинал в контекст для анализа
                     parsed_res = json.loads(search_res)
-                    if parsed_res and isinstance(parsed_res, list):
+                    if parsed_res and isinstance(parsed_res, list) and len(parsed_res) > 0:
                         top_photo = parsed_res[0]
                         file_bytes = self.drive.download_image_bytes(top_photo["id"])
                         loaded_images.append(file_bytes)
                         
-                        # Передаем оригинальное изображение напрямую модели
                         contents.append(types.Content(
                             role="user",
                             parts=[
-                                types.Part.from_bytes(
-                                    data=file_bytes,
-                                    mime_type="image/jpeg"
-                                ),
-                                types.Part.from_text(
-                                    text=f"Вот оригинальное изображение файла '{top_photo['name']}' (путь: {top_photo['folder_path']}). Описание: '{top_photo['description']}'. Изучи его для ответа."
-                                )
+                                types.Part.from_bytes(data=file_bytes, mime_type="image/jpeg"),
+                                types.Part.from_text(text=f"Изображение '{top_photo['name']}' (описание: {top_photo['description']}). Изучи его для ответа.")
                             ]
                         ))

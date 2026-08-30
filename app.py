@@ -35,7 +35,7 @@ drive_mgr = get_drive_manager()
 with st.sidebar:
     st.header("⚙️ Статус и настройки")
     
-   model_choice = st.selectbox(
+    model_choice = st.selectbox(
         "Модель Gemini",
         options=[
             "gemini-2.5-flash",
@@ -44,7 +44,7 @@ with st.sidebar:
             "gemini-1.5-pro"
         ],
         index=0,
-        help="2.5 Flash — быстрая и стабильная, 2.5 Pro / 1.5 Pro — глубокий анализ текста и фото."
+        help="2.5 Flash — быстрая и стабильная, 2.5 Pro / 1.5 Pro — глубокий анализ текста и деталей."
     )
     
     photos_index = load_photos_index(drive_mgr)
@@ -81,16 +81,13 @@ for msg in st.session_state.messages:
 
 # Поле ввода запроса
 if prompt := st.chat_input("Спросите о документах, покупках, ремонте или фото..."):
-    # Добавляем сообщение пользователя в интерфейс и историю
     st.session_state.messages.append({"role": "user", "content": prompt})
     with st.chat_message("user"):
         st.markdown(prompt)
 
-    # Генерация ответа ассистента
     with st.chat_message("assistant"):
         with st.spinner("Анализирую метаданные и фотографии..."):
             try:
-                # Передаем историю диалога в агент
                 history = [
                     {"role": m["role"], "content": m["content"]}
                     for m in st.session_state.messages[:-1]
@@ -98,16 +95,13 @@ if prompt := st.chat_input("Спросите о документах, покуп
                 
                 response_text, _, loaded_images = agent.generate_response(history, prompt)
                 
-                # Выводим текстовый ответ
                 st.markdown(response_text)
                 
-                # Если модель открывала оригиналы фото — показываем их пользователю
                 if loaded_images:
                     cols = st.columns(len(loaded_images))
                     for idx, img_bytes in enumerate(loaded_images):
                         cols[idx].image(img_bytes, caption="Изученный оригинал", use_container_width=True)
 
-                # Сохраняем в историю сессии
                 st.session_state.messages.append({
                     "role": "assistant",
                     "content": response_text,
